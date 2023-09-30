@@ -1,6 +1,6 @@
 """
-Multiclass classification strategies
-====================================
+Multiclass and multilabel classification strategies
+===================================================
 
 This module implements multiclass learning algorithms:
     - one-vs-the-rest / one-vs-all
@@ -34,37 +34,27 @@ case.
 # License: BSD 3 clause
 
 import array
-import itertools
-import warnings
-from numbers import Integral, Real
-
 import numpy as np
+import warnings
 import scipy.sparse as sp
+import itertools
 
-from .base import (
-    BaseEstimator,
-    ClassifierMixin,
-    MetaEstimatorMixin,
-    MultiOutputMixin,
-    _fit_context,
-    clone,
-    is_classifier,
-    is_regressor,
-)
-from .metrics.pairwise import pairwise_distances_argmin
+from .base import BaseEstimator, ClassifierMixin, clone, is_classifier
+from .base import MetaEstimatorMixin, is_regressor
 from .preprocessing import LabelBinarizer
+from .metrics.pairwise import euclidean_distances
 from .utils import check_random_state
-from .utils._param_validation import HasMethods, Interval
-from .utils._tags import _safe_tags
-from .utils.metadata_routing import _RoutingNotSupportedMixin
-from .utils.metaestimators import _safe_split, available_if
-from .utils.multiclass import (
-    _check_partial_fit_first_call,
-    _ovr_decision_function,
-    check_classification_targets,
-)
-from .utils.parallel import Parallel, delayed
-from .utils.validation import _num_samples, check_is_fitted
+from .utils.validation import _num_samples
+from .utils.validation import check_is_fitted
+from .utils.validation import check_X_y, check_array
+from .utils.multiclass import (_check_partial_fit_first_call,
+                               check_classification_targets,
+                               _ovr_decision_function)
+from .utils.metaestimators import _safe_split, if_delegate_has_method
+
+from .utils import Parallel
+from .utils import delayed
+from .externals.six.moves import zip as izip
 
 __all__ = [
     "OneVsRestClassifier",
@@ -82,9 +72,8 @@ def _fit_binary(estimator, X, y, classes=None):
                 c = 0
             else:
                 c = y[0]
-            warnings.warn(
-                "Label %s is present in all training examples." % str(classes[c])
-            )
+            warnings.warn("Label %s is present in all training examples." %
+                          str(classes[c]))
         estimator = _ConstantPredictor().fit(X, unique_y)
     else:
         estimator = clone(estimator)
@@ -110,86 +99,39 @@ def _predict_binary(estimator, X):
     return score
 
 
-def _threshold_for_binary_predict(estimator):
-    """Threshold for predictions from binary estimator."""
-    if hasattr(estimator, "decision_function") and is_classifier(estimator):
-        return 0.0
-    else:
-        # predict_proba threshold
-        return 0.5
+def _check_estimator(estimator):
+    """Make sure that an estimator implements the necessary methods."""
+    if (not hasattr(estimator, "decision_function") and
+            not hasattr(estimator, "predict_proba")):
+        raise ValueError("The base estimator should implement "
+                         "decision_function or predict_proba!")
 
 
 class _ConstantPredictor(BaseEstimator):
+
     def fit(self, X, y):
-        check_params = dict(
-            force_all_finite=False, dtype=None, ensure_2d=False, accept_sparse=True
-        )
-        self._validate_data(
-            X, y, reset=True, validate_separately=(check_params, check_params)
-        )
         self.y_ = y
         return self
 
     def predict(self, X):
-        check_is_fitted(self)
-        self._validate_data(
-            X,
-            force_all_finite=False,
-            dtype=None,
-            accept_sparse=True,
-            ensure_2d=False,
-            reset=False,
-        )
+        check_is_fitted(self, 'y_')
 
-        return np.repeat(self.y_, _num_samples(X))
+        return np.repeat(self.y_, X.shape[0])
 
     def decision_function(self, X):
-        check_is_fitted(self)
-        self._validate_data(
-            X,
-            force_all_finite=False,
-            dtype=None,
-            accept_sparse=True,
-            ensure_2d=False,
-            reset=False,
-        )
+        check_is_fitted(self, 'y_')
 
-        return np.repeat(self.y_, _num_samples(X))
+        return np.repeat(self.y_, X.shape[0])
 
     def predict_proba(self, X):
-        check_is_fitted(self)
-        self._validate_data(
-            X,
-            force_all_finite=False,
-            dtype=None,
-            accept_sparse=True,
-            ensure_2d=False,
-            reset=False,
-        )
-        y_ = self.y_.astype(np.float64)
-        return np.repeat([np.hstack([1 - y_, y_])], _num_samples(X), axis=0)
+        check_is_fitted(self, 'y_')
+
+        return np.repeat([np.hstack([1 - self.y_, self.y_])],
+                         X.shape[0], axis=0)
 
 
-def _estimators_has(attr):
-    """Check if self.estimator or self.estimators_[0] has attr.
-
-    If `self.estimators_[0]` has the attr, then its safe to assume that other
-    values has it too. This function is used together with `avaliable_if`.
-    """
-    return lambda self: (
-        hasattr(self.estimator, attr)
-        or (hasattr(self, "estimators_") and hasattr(self.estimators_[0], attr))
-    )
-
-
-class OneVsRestClassifier(
-    _RoutingNotSupportedMixin,
-    MultiOutputMixin,
-    ClassifierMixin,
-    MetaEstimatorMixin,
-    BaseEstimator,
-):
-    """One-vs-the-rest (OvR) multiclass strategy.
+class OneVsRestClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
+    """One-vs-the-rest (OvR) multiclass/multilabel strategy
 
     Also known as one-vs-all, this strategy consists in fitting one classifier
     per class. For each classifier, the class is fitted against all the other
@@ -200,44 +142,26 @@ class OneVsRestClassifier(
     corresponding classifier. This is the most commonly used strategy for
     multiclass classification and is a fair default choice.
 
-    OneVsRestClassifier can also be used for multilabel classification. To use
-    this feature, provide an indicator matrix for the target `y` when calling
-    `.fit`. In other words, the target labels should be formatted as a 2D
-    binary (0/1) matrix, where [i, j] == 1 indicates the presence of label j
-    in sample i. This estimator uses the binary relevance method to perform
-    multilabel classification, which involves training one binary classifier
-    independently for each label.
+    This strategy can also be used for multilabel learning, where a classifier
+    is used to predict multiple labels for instance, by fitting on a 2-d matrix
+    in which cell [i, j] is 1 if sample i has label j and 0 otherwise.
+
+    In the multilabel learning literature, OvR is also known as the binary
+    relevance method.
 
     Read more in the :ref:`User Guide <ovr_classification>`.
 
     Parameters
     ----------
     estimator : estimator object
-        A regressor or a classifier that implements :term:`fit`.
-        When a classifier is passed, :term:`decision_function` will be used
-        in priority and it will fallback to :term:`predict_proba` if it is not
-        available.
-        When a regressor is passed, :term:`predict` is used.
+        An estimator object implementing `fit` and one of `decision_function`
+        or `predict_proba`.
 
-    n_jobs : int, default=None
-        The number of jobs to use for the computation: the `n_classes`
-        one-vs-rest problems are computed in parallel.
-
+    n_jobs : int or None, optional (default=None)
+        The number of jobs to use for the computation.
         ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
         ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
         for more details.
-
-        .. versionchanged:: 0.20
-           `n_jobs` default changed from 1 to None
-
-    verbose : int, default=0
-        The verbosity level, if non zero, progress messages are printed.
-        Below 50, the output is sent to stderr. Otherwise, the output is sent
-        to stdout. The frequency of the messages increases with the verbosity
-        level, reporting all iterations at 10. See :class:`joblib.Parallel` for
-        more details.
-
-        .. versionadded:: 1.1
 
     Attributes
     ----------
@@ -246,88 +170,31 @@ class OneVsRestClassifier(
 
     classes_ : array, shape = [`n_classes`]
         Class labels.
-
-    n_classes_ : int
-        Number of classes.
-
     label_binarizer_ : LabelBinarizer object
         Object used to transform multiclass labels to binary labels and
         vice-versa.
-
     multilabel_ : boolean
         Whether a OneVsRestClassifier is a multilabel classifier.
-
-    n_features_in_ : int
-        Number of features seen during :term:`fit`. Only defined if the
-        underlying estimator exposes such an attribute when fit.
-
-        .. versionadded:: 0.24
-
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
-        Names of features seen during :term:`fit`. Only defined if the
-        underlying estimator exposes such an attribute when fit.
-
-        .. versionadded:: 1.0
-
-    See Also
-    --------
-    OneVsOneClassifier : One-vs-one multiclass strategy.
-    OutputCodeClassifier : (Error-Correcting) Output-Code multiclass strategy.
-    sklearn.multioutput.MultiOutputClassifier : Alternate way of extending an
-        estimator for multilabel classification.
-    sklearn.preprocessing.MultiLabelBinarizer : Transform iterable of iterables
-        to binary indicator matrix.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from sklearn.multiclass import OneVsRestClassifier
-    >>> from sklearn.svm import SVC
-    >>> X = np.array([
-    ...     [10, 10],
-    ...     [8, 10],
-    ...     [-5, 5.5],
-    ...     [-5.4, 5.5],
-    ...     [-20, -20],
-    ...     [-15, -20]
-    ... ])
-    >>> y = np.array([0, 0, 1, 1, 2, 2])
-    >>> clf = OneVsRestClassifier(SVC()).fit(X, y)
-    >>> clf.predict([[-19, -20], [9, 9], [-5, 5]])
-    array([2, 0, 1])
     """
-
-    _parameter_constraints = {
-        "estimator": [HasMethods(["fit"])],
-        "n_jobs": [Integral, None],
-        "verbose": ["verbose"],
-    }
-
-    def __init__(self, estimator, *, n_jobs=None, verbose=0):
+    def __init__(self, estimator, n_jobs=None):
         self.estimator = estimator
         self.n_jobs = n_jobs
-        self.verbose = verbose
 
-    @_fit_context(
-        # OneVsRestClassifier.estimator is not validated yet
-        prefer_skip_nested_validation=False
-    )
     def fit(self, X, y):
         """Fit underlying estimators.
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
-        y : {array-like, sparse matrix} of shape (n_samples,) or (n_samples, n_classes)
+        y : (sparse) array-like, shape = [n_samples, ], [n_samples, n_classes]
             Multi-class targets. An indicator matrix turns on multilabel
             classification.
 
         Returns
         -------
-        self : object
-            Instance of fitted estimator.
+        self
         """
         # A sparse LabelBinarizer, with sparse_output=True, has been shown to
         # outperform or match a dense label binarizer in all cases and has also
@@ -341,43 +208,27 @@ class OneVsRestClassifier(
         # In cases where individual estimators are very fast to train setting
         # n_jobs > 1 in can results in slower performance due to the overhead
         # of spawning threads.  See joblib issue #112.
-        self.estimators_ = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-            delayed(_fit_binary)(
-                self.estimator,
-                X,
-                column,
-                classes=[
-                    "not %s" % self.label_binarizer_.classes_[i],
-                    self.label_binarizer_.classes_[i],
-                ],
-            )
-            for i, column in enumerate(columns)
-        )
-
-        if hasattr(self.estimators_[0], "n_features_in_"):
-            self.n_features_in_ = self.estimators_[0].n_features_in_
-        if hasattr(self.estimators_[0], "feature_names_in_"):
-            self.feature_names_in_ = self.estimators_[0].feature_names_in_
+        self.estimators_ = Parallel(n_jobs=self.n_jobs)(delayed(_fit_binary)(
+            self.estimator, X, column, classes=[
+                "not %s" % self.label_binarizer_.classes_[i],
+                self.label_binarizer_.classes_[i]])
+            for i, column in enumerate(columns))
 
         return self
 
-    @available_if(_estimators_has("partial_fit"))
-    @_fit_context(
-        # OneVsRestClassifier.estimator is not validated yet
-        prefer_skip_nested_validation=False
-    )
+    @if_delegate_has_method('estimator')
     def partial_fit(self, X, y, classes=None):
-        """Partially fit underlying estimators.
+        """Partially fit underlying estimators
 
         Should be used when memory is inefficient to train all data.
         Chunks of data can be passed in several iteration.
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
-        y : {array-like, sparse matrix} of shape (n_samples,) or (n_samples, n_classes)
+        y : (sparse) array-like, shape = [n_samples, ], [n_samples, n_classes]
             Multi-class targets. An indicator matrix turns on multilabel
             classification.
 
@@ -390,17 +241,14 @@ class OneVsRestClassifier(
 
         Returns
         -------
-        self : object
-            Instance of partially fitted estimator.
+        self
         """
         if _check_partial_fit_first_call(self, classes):
             if not hasattr(self.estimator, "partial_fit"):
-                raise ValueError(
-                    ("Base estimator {0}, doesn't have partial_fit method").format(
-                        self.estimator
-                    )
-                )
-            self.estimators_ = [clone(self.estimator) for _ in range(self.n_classes_)]
+                raise ValueError(("Base estimator {0}, doesn't have "
+                                 "partial_fit method").format(self.estimator))
+            self.estimators_ = [clone(self.estimator) for _ in range
+                                (self.n_classes_)]
 
             # A sparse LabelBinarizer, with sparse_output=True, has been
             # shown to outperform or match a dense label binarizer in all
@@ -410,11 +258,9 @@ class OneVsRestClassifier(
             self.label_binarizer_.fit(self.classes_)
 
         if len(np.setdiff1d(y, self.classes_)):
-            raise ValueError(
-                (
-                    "Mini-batch contains {0} while classes " + "must be subset of {1}"
-                ).format(np.unique(y), self.classes_)
-            )
+            raise ValueError(("Mini-batch contains {0} while classes " +
+                             "must be subset of {1}").format(np.unique(y),
+                                                             self.classes_))
 
         Y = self.label_binarizer_.transform(y)
         Y = Y.tocsc()
@@ -422,11 +268,7 @@ class OneVsRestClassifier(
 
         self.estimators_ = Parallel(n_jobs=self.n_jobs)(
             delayed(_partial_fit_binary)(estimator, X, column)
-            for estimator, column in zip(self.estimators_, columns)
-        )
-
-        if hasattr(self.estimators_[0], "n_features_in_"):
-            self.n_features_in_ = self.estimators_[0].n_features_in_
+            for estimator, column in izip(self.estimators_, columns))
 
         return self
 
@@ -435,15 +277,20 @@ class OneVsRestClassifier(
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
         Returns
         -------
-        y : {array-like, sparse matrix} of shape (n_samples,) or (n_samples, n_classes)
+        y : (sparse) array-like, shape = [n_samples, ], [n_samples, n_classes].
             Predicted multi-class targets.
         """
-        check_is_fitted(self)
+        check_is_fitted(self, 'estimators_')
+        if (hasattr(self.estimators_[0], "decision_function") and
+                is_classifier(self.estimators_[0])):
+            thresh = 0
+        else:
+            thresh = .5
 
         n_samples = _num_samples(X)
         if self.label_binarizer_.y_type_ == "multiclass":
@@ -454,21 +301,19 @@ class OneVsRestClassifier(
                 pred = _predict_binary(e, X)
                 np.maximum(maxima, pred, out=maxima)
                 argmaxima[maxima == pred] = i
-            return self.classes_[argmaxima]
+            return self.classes_[np.array(argmaxima.T)]
         else:
-            thresh = _threshold_for_binary_predict(self.estimators_[0])
-            indices = array.array("i")
-            indptr = array.array("i", [0])
+            indices = array.array('i')
+            indptr = array.array('i', [0])
             for e in self.estimators_:
                 indices.extend(np.where(_predict_binary(e, X) > thresh)[0])
                 indptr.append(len(indices))
             data = np.ones(len(indices), dtype=int)
-            indicator = sp.csc_matrix(
-                (data, indices, indptr), shape=(n_samples, len(self.estimators_))
-            )
+            indicator = sp.csc_matrix((data, indices, indptr),
+                                      shape=(n_samples, len(self.estimators_)))
             return self.label_binarizer_.inverse_transform(indicator)
 
-    @available_if(_estimators_has("predict_proba"))
+    @if_delegate_has_method(['_first_estimator', 'estimator'])
     def predict_proba(self, X):
         """Probability estimates.
 
@@ -484,16 +329,15 @@ class OneVsRestClassifier(
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
-            Input data.
+        X : array-like, shape = [n_samples, n_features]
 
         Returns
         -------
-        T : array-like of shape (n_samples, n_classes)
+        T : (sparse) array-like, shape = [n_samples, n_classes]
             Returns the probability of the sample for each class in the model,
             where classes are ordered as they are in `self.classes_`.
         """
-        check_is_fitted(self)
+        check_is_fitted(self, 'estimators_')
         # Y[i, j] gives the probability that sample i has the label j.
         # In the multi-label case, these are not disjoint.
         Y = np.array([e.predict_proba(X)[:, 1] for e in self.estimators_]).T
@@ -508,68 +352,75 @@ class OneVsRestClassifier(
             Y /= np.sum(Y, axis=1)[:, np.newaxis]
         return Y
 
-    @available_if(_estimators_has("decision_function"))
+    @if_delegate_has_method(['_first_estimator', 'estimator'])
     def decision_function(self, X):
-        """Decision function for the OneVsRestClassifier.
-
-        Return the distance of each sample from the decision boundary for each
-        class. This can only be used with estimators which implement the
-        `decision_function` method.
+        """Returns the distance of each sample from the decision boundary for
+        each class. This can only be used with estimators which implement the
+        decision_function method.
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
-            Input data.
+        X : array-like, shape = [n_samples, n_features]
 
         Returns
         -------
-        T : array-like of shape (n_samples, n_classes) or (n_samples,) for \
-            binary classification.
-            Result of calling `decision_function` on the final estimator.
-
-            .. versionchanged:: 0.19
-                output shape changed to ``(n_samples,)`` to conform to
-                scikit-learn conventions for binary classification.
+        T : array-like, shape = [n_samples, n_classes]
         """
-        check_is_fitted(self)
+        check_is_fitted(self, 'estimators_')
         if len(self.estimators_) == 1:
             return self.estimators_[0].decision_function(X)
-        return np.array(
-            [est.decision_function(X).ravel() for est in self.estimators_]
-        ).T
+        return np.array([est.decision_function(X).ravel()
+                         for est in self.estimators_]).T
 
     @property
     def multilabel_(self):
-        """Whether this is a multilabel classifier."""
-        return self.label_binarizer_.y_type_.startswith("multilabel")
+        """Whether this is a multilabel classifier"""
+        return self.label_binarizer_.y_type_.startswith('multilabel')
 
     @property
     def n_classes_(self):
-        """Number of classes."""
         return len(self.classes_)
 
-    def _more_tags(self):
+    @property
+    def coef_(self):
+        check_is_fitted(self, 'estimators_')
+        if not hasattr(self.estimators_[0], "coef_"):
+            raise AttributeError(
+                "Base estimator doesn't have a coef_ attribute.")
+        coefs = [e.coef_ for e in self.estimators_]
+        if sp.issparse(coefs[0]):
+            return sp.vstack(coefs)
+        return np.vstack(coefs)
+
+    @property
+    def intercept_(self):
+        check_is_fitted(self, 'estimators_')
+        if not hasattr(self.estimators_[0], "intercept_"):
+            raise AttributeError(
+                "Base estimator doesn't have an intercept_ attribute.")
+        return np.array([e.intercept_.ravel() for e in self.estimators_])
+
+    @property
+    def _pairwise(self):
         """Indicate if wrapped estimator is using a precomputed Gram matrix"""
-        return {"pairwise": _safe_tags(self.estimator, key="pairwise")}
+        return getattr(self.estimator, "_pairwise", False)
+
+    @property
+    def _first_estimator(self):
+        return self.estimators_[0]
 
 
 def _fit_ovo_binary(estimator, X, y, i, j):
     """Fit a single binary estimator (one-vs-one)."""
     cond = np.logical_or(y == i, y == j)
     y = y[cond]
-    y_binary = np.empty(y.shape, int)
+    y_binary = np.empty(y.shape, np.int)
     y_binary[y == i] = 0
     y_binary[y == j] = 1
-    indcond = np.arange(_num_samples(X))[cond]
-    return (
-        _fit_binary(
-            estimator,
-            _safe_split(estimator, X, None, indices=indcond)[0],
-            y_binary,
-            classes=[i, j],
-        ),
-        indcond,
-    )
+    indcond = np.arange(X.shape[0])[cond]
+    return _fit_binary(estimator,
+                       _safe_split(estimator, X, None, indices=indcond)[0],
+                       y_binary, classes=[i, j]), indcond
 
 
 def _partial_fit_ovo_binary(estimator, X, y, i, j):
@@ -584,10 +435,8 @@ def _partial_fit_ovo_binary(estimator, X, y, i, j):
     return estimator
 
 
-class OneVsOneClassifier(
-    _RoutingNotSupportedMixin, MetaEstimatorMixin, ClassifierMixin, BaseEstimator
-):
-    """One-vs-one multiclass strategy.
+class OneVsOneClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
+    """One-vs-one multiclass strategy
 
     This strategy consists in fitting one classifier per class pair.
     At prediction time, the class which received the most votes is selected.
@@ -604,146 +453,80 @@ class OneVsOneClassifier(
     Parameters
     ----------
     estimator : estimator object
-        A regressor or a classifier that implements :term:`fit`.
-        When a classifier is passed, :term:`decision_function` will be used
-        in priority and it will fallback to :term:`predict_proba` if it is not
-        available.
-        When a regressor is passed, :term:`predict` is used.
+        An estimator object implementing `fit` and one of `decision_function`
+        or `predict_proba`.
 
-    n_jobs : int, default=None
-        The number of jobs to use for the computation: the `n_classes * (
-        n_classes - 1) / 2` OVO problems are computed in parallel.
-
+    n_jobs : int or None, optional (default=None)
+        The number of jobs to use for the computation.
         ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
         ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
         for more details.
 
     Attributes
     ----------
-    estimators_ : list of ``n_classes * (n_classes - 1) / 2`` estimators
+    estimators_ : list of `n_classes * (n_classes - 1) / 2` estimators
         Estimators used for predictions.
 
     classes_ : numpy array of shape [n_classes]
         Array containing labels.
-
-    n_classes_ : int
-        Number of classes.
-
-    pairwise_indices_ : list, length = ``len(estimators_)``, or ``None``
-        Indices of samples used when training the estimators.
-        ``None`` when ``estimator``'s `pairwise` tag is False.
-
-    n_features_in_ : int
-        Number of features seen during :term:`fit`.
-
-        .. versionadded:: 0.24
-
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
-        Names of features seen during :term:`fit`. Defined only when `X`
-        has feature names that are all strings.
-
-        .. versionadded:: 1.0
-
-    See Also
-    --------
-    OneVsRestClassifier : One-vs-all multiclass strategy.
-    OutputCodeClassifier : (Error-Correcting) Output-Code multiclass strategy.
-
-    Examples
-    --------
-    >>> from sklearn.datasets import load_iris
-    >>> from sklearn.model_selection import train_test_split
-    >>> from sklearn.multiclass import OneVsOneClassifier
-    >>> from sklearn.svm import LinearSVC
-    >>> X, y = load_iris(return_X_y=True)
-    >>> X_train, X_test, y_train, y_test = train_test_split(
-    ...     X, y, test_size=0.33, shuffle=True, random_state=0)
-    >>> clf = OneVsOneClassifier(
-    ...     LinearSVC(dual="auto", random_state=0)).fit(X_train, y_train)
-    >>> clf.predict(X_test[:10])
-    array([2, 1, 0, 2, 0, 2, 0, 1, 1, 1])
     """
 
-    _parameter_constraints: dict = {
-        "estimator": [HasMethods(["fit"])],
-        "n_jobs": [Integral, None],
-    }
-
-    def __init__(self, estimator, *, n_jobs=None):
+    def __init__(self, estimator, n_jobs=None):
         self.estimator = estimator
         self.n_jobs = n_jobs
 
-    @_fit_context(
-        # OneVsOneClassifier.estimator is not validated yet
-        prefer_skip_nested_validation=False
-    )
     def fit(self, X, y):
         """Fit underlying estimators.
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
-        y : array-like of shape (n_samples,)
+        y : array-like, shape = [n_samples]
             Multi-class targets.
 
         Returns
         -------
-        self : object
-            The fitted underlying estimator.
+        self
         """
-        # We need to validate the data because we do a safe_indexing later.
-        X, y = self._validate_data(
-            X, y, accept_sparse=["csr", "csc"], force_all_finite=False
-        )
+        X, y = check_X_y(X, y, accept_sparse=['csr', 'csc'])
         check_classification_targets(y)
 
         self.classes_ = np.unique(y)
         if len(self.classes_) == 1:
-            raise ValueError(
-                "OneVsOneClassifier can not be fit when only one class is present."
-            )
+            raise ValueError("OneVsOneClassifier can not be fit when only one"
+                             " class is present.")
         n_classes = self.classes_.shape[0]
-        estimators_indices = list(
-            zip(
-                *(
-                    Parallel(n_jobs=self.n_jobs)(
-                        delayed(_fit_ovo_binary)(
-                            self.estimator, X, y, self.classes_[i], self.classes_[j]
-                        )
-                        for i in range(n_classes)
-                        for j in range(i + 1, n_classes)
-                    )
-                )
-            )
-        )
+        estimators_indices = list(zip(*(Parallel(n_jobs=self.n_jobs)(
+            delayed(_fit_ovo_binary)
+            (self.estimator, X, y, self.classes_[i], self.classes_[j])
+            for i in range(n_classes) for j in range(i + 1, n_classes)))))
 
         self.estimators_ = estimators_indices[0]
-
-        pairwise = self._get_tags()["pairwise"]
-        self.pairwise_indices_ = estimators_indices[1] if pairwise else None
+        try:
+            self.pairwise_indices_ = (
+                estimators_indices[1] if self._pairwise else None)
+        except AttributeError:
+            self.pairwise_indices_ = None
 
         return self
 
-    @available_if(_estimators_has("partial_fit"))
-    @_fit_context(
-        # OneVsOneClassifier.estimator is not validated yet
-        prefer_skip_nested_validation=False
-    )
+    @if_delegate_has_method(delegate='estimator')
     def partial_fit(self, X, y, classes=None):
-        """Partially fit underlying estimators.
+        """Partially fit underlying estimators
 
         Should be used when memory is inefficient to train all data. Chunks
         of data can be passed in several iteration, where the first call
         should have an array of all target variables.
 
+
         Parameters
         ----------
-        X : {array-like, sparse matrix) of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
-        y : array-like of shape (n_samples,)
+        y : array-like, shape = [n_samples]
             Multi-class targets.
 
         classes : array, shape (n_classes, )
@@ -755,43 +538,29 @@ class OneVsOneClassifier(
 
         Returns
         -------
-        self : object
-            The partially fitted underlying estimator.
+        self
         """
-        first_call = _check_partial_fit_first_call(self, classes)
-        if first_call:
-            self.estimators_ = [
-                clone(self.estimator)
-                for _ in range(self.n_classes_ * (self.n_classes_ - 1) // 2)
-            ]
+        if _check_partial_fit_first_call(self, classes):
+            self.estimators_ = [clone(self.estimator) for i in
+                                range(self.n_classes_ *
+                                      (self.n_classes_ - 1) // 2)]
 
         if len(np.setdiff1d(y, self.classes_)):
-            raise ValueError(
-                "Mini-batch contains {0} while it must be subset of {1}".format(
-                    np.unique(y), self.classes_
-                )
-            )
+            raise ValueError("Mini-batch contains {0} while it "
+                             "must be subset of {1}".format(np.unique(y),
+                                                            self.classes_))
 
-        X, y = self._validate_data(
-            X,
-            y,
-            accept_sparse=["csr", "csc"],
-            force_all_finite=False,
-            reset=first_call,
-        )
+        X, y = check_X_y(X, y, accept_sparse=['csr', 'csc'])
         check_classification_targets(y)
         combinations = itertools.combinations(range(self.n_classes_), 2)
-        self.estimators_ = Parallel(n_jobs=self.n_jobs)(
-            delayed(_partial_fit_ovo_binary)(
-                estimator, X, y, self.classes_[i], self.classes_[j]
-            )
-            for estimator, (i, j) in zip(self.estimators_, (combinations))
-        )
+        self.estimators_ = Parallel(
+            n_jobs=self.n_jobs)(
+                delayed(_partial_fit_ovo_binary)(
+                    estimator, X, y, self.classes_[i], self.classes_[j])
+                for estimator, (i, j) in izip(self.estimators_,
+                                              (combinations)))
 
         self.pairwise_indices_ = None
-
-        if hasattr(self.estimators_[0], "n_features_in_"):
-            self.n_features_in_ = self.estimators_[0].n_features_in_
 
         return self
 
@@ -804,7 +573,7 @@ class OneVsOneClassifier(
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
         Returns
@@ -814,8 +583,7 @@ class OneVsOneClassifier(
         """
         Y = self.decision_function(X)
         if self.n_classes_ == 2:
-            thresh = _threshold_for_binary_predict(self.estimators_[0])
-            return self.classes_[(Y > thresh).astype(int)]
+            return self.classes_[(Y > 0).astype(np.int)]
         return self.classes_[Y.argmax(axis=1)]
 
     def decision_function(self, X):
@@ -828,25 +596,13 @@ class OneVsOneClassifier(
 
         Parameters
         ----------
-        X : array-like of shape (n_samples, n_features)
-            Input data.
+        X : array-like, shape = [n_samples, n_features]
 
         Returns
         -------
-        Y : array-like of shape (n_samples, n_classes) or (n_samples,)
-            Result of calling `decision_function` on the final estimator.
-
-            .. versionchanged:: 0.19
-                output shape changed to ``(n_samples,)`` to conform to
-                scikit-learn conventions for binary classification.
+        Y : array-like, shape = [n_samples, n_classes]
         """
-        check_is_fitted(self)
-        X = self._validate_data(
-            X,
-            accept_sparse=True,
-            force_all_finite=False,
-            reset=False,
-        )
+        check_is_fitted(self, 'estimators_')
 
         indices = self.pairwise_indices_
         if indices is None:
@@ -854,31 +610,28 @@ class OneVsOneClassifier(
         else:
             Xs = [X[:, idx] for idx in indices]
 
-        predictions = np.vstack(
-            [est.predict(Xi) for est, Xi in zip(self.estimators_, Xs)]
-        ).T
-        confidences = np.vstack(
-            [_predict_binary(est, Xi) for est, Xi in zip(self.estimators_, Xs)]
-        ).T
-        Y = _ovr_decision_function(predictions, confidences, len(self.classes_))
+        predictions = np.vstack([est.predict(Xi)
+                                 for est, Xi in zip(self.estimators_, Xs)]).T
+        confidences = np.vstack([_predict_binary(est, Xi)
+                                 for est, Xi in zip(self.estimators_, Xs)]).T
+        Y = _ovr_decision_function(predictions,
+                                   confidences, len(self.classes_))
         if self.n_classes_ == 2:
             return Y[:, 1]
         return Y
 
     @property
     def n_classes_(self):
-        """Number of classes."""
         return len(self.classes_)
 
-    def _more_tags(self):
+    @property
+    def _pairwise(self):
         """Indicate if wrapped estimator is using a precomputed Gram matrix"""
-        return {"pairwise": _safe_tags(self.estimator, key="pairwise")}
+        return getattr(self.estimator, "_pairwise", False)
 
 
-class OutputCodeClassifier(
-    _RoutingNotSupportedMixin, MetaEstimatorMixin, ClassifierMixin, BaseEstimator
-):
-    """(Error-Correcting) Output-Code multiclass strategy.
+class OutputCodeClassifier(BaseEstimator, ClassifierMixin, MetaEstimatorMixin):
+    """(Error-Correcting) Output-Code multiclass strategy
 
     Output-code based strategies consist in representing each class with a
     binary code (an array of 0s and 1s). At fitting time, one binary
@@ -886,32 +639,31 @@ class OutputCodeClassifier(
     classifiers are used to project new points in the class space and the class
     closest to the points is chosen. The main advantage of these strategies is
     that the number of classifiers used can be controlled by the user, either
-    for compressing the model (0 < `code_size` < 1) or for making the model more
-    robust to errors (`code_size` > 1). See the documentation for more details.
+    for compressing the model (0 < code_size < 1) or for making the model more
+    robust to errors (code_size > 1). See the documentation for more details.
 
     Read more in the :ref:`User Guide <ecoc>`.
 
     Parameters
     ----------
     estimator : estimator object
-        An estimator object implementing :term:`fit` and one of
-        :term:`decision_function` or :term:`predict_proba`.
+        An estimator object implementing `fit` and one of `decision_function`
+        or `predict_proba`.
 
-    code_size : float, default=1.5
+    code_size : float
         Percentage of the number of classes to be used to create the code book.
         A number between 0 and 1 will require fewer classifiers than
         one-vs-the-rest. A number greater than 1 will require more classifiers
         than one-vs-the-rest.
 
-    random_state : int, RandomState instance, default=None
-        The generator used to initialize the codebook.
-        Pass an int for reproducible output across multiple function calls.
-        See :term:`Glossary <random_state>`.
+    random_state : int, RandomState instance or None, optional, default: None
+        The generator used to initialize the codebook.  If int, random_state is
+        the seed used by the random number generator; If RandomState instance,
+        random_state is the random number generator; If None, the random number
+        generator is the RandomState instance used by `np.random`.
 
-    n_jobs : int, default=None
-        The number of jobs to use for the computation: the multiclass problems
-        are computed in parallel.
-
+    n_jobs : int or None, optional (default=None)
+        The number of jobs to use for the computation.
         ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
         ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
         for more details.
@@ -921,28 +673,11 @@ class OutputCodeClassifier(
     estimators_ : list of `int(n_classes * code_size)` estimators
         Estimators used for predictions.
 
-    classes_ : ndarray of shape (n_classes,)
+    classes_ : numpy array of shape [n_classes]
         Array containing labels.
 
-    code_book_ : ndarray of shape (n_classes, code_size)
+    code_book_ : numpy array of shape [n_classes, code_size]
         Binary array containing the code of each class.
-
-    n_features_in_ : int
-        Number of features seen during :term:`fit`. Only defined if the
-        underlying estimator exposes such an attribute when fit.
-
-        .. versionadded:: 0.24
-
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
-        Names of features seen during :term:`fit`. Only defined if the
-        underlying estimator exposes such an attribute when fit.
-
-        .. versionadded:: 1.0
-
-    See Also
-    --------
-    OneVsRestClassifier : One-vs-all multiclass strategy.
-    OneVsOneClassifier : One-vs-one multiclass strategy.
 
     References
     ----------
@@ -961,96 +696,61 @@ class OutputCodeClassifier(
     .. [3] "The Elements of Statistical Learning",
        Hastie T., Tibshirani R., Friedman J., page 606 (second-edition)
        2008.
-
-    Examples
-    --------
-    >>> from sklearn.multiclass import OutputCodeClassifier
-    >>> from sklearn.ensemble import RandomForestClassifier
-    >>> from sklearn.datasets import make_classification
-    >>> X, y = make_classification(n_samples=100, n_features=4,
-    ...                            n_informative=2, n_redundant=0,
-    ...                            random_state=0, shuffle=False)
-    >>> clf = OutputCodeClassifier(
-    ...     estimator=RandomForestClassifier(random_state=0),
-    ...     random_state=0).fit(X, y)
-    >>> clf.predict([[0, 0, 0, 0]])
-    array([1])
     """
 
-    _parameter_constraints: dict = {
-        "estimator": [
-            HasMethods(["fit", "decision_function"]),
-            HasMethods(["fit", "predict_proba"]),
-        ],
-        "code_size": [Interval(Real, 0.0, None, closed="neither")],
-        "random_state": ["random_state"],
-        "n_jobs": [Integral, None],
-    }
-
-    def __init__(self, estimator, *, code_size=1.5, random_state=None, n_jobs=None):
+    def __init__(self, estimator, code_size=1.5, random_state=None,
+                 n_jobs=None):
         self.estimator = estimator
         self.code_size = code_size
         self.random_state = random_state
         self.n_jobs = n_jobs
 
-    @_fit_context(
-        # OutputCodeClassifier.estimator is not validated yet
-        prefer_skip_nested_validation=False
-    )
     def fit(self, X, y):
         """Fit underlying estimators.
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
-        y : array-like of shape (n_samples,)
+        y : numpy array of shape [n_samples]
             Multi-class targets.
 
         Returns
         -------
-        self : object
-            Returns a fitted instance of self.
+        self
         """
-        y = self._validate_data(X="no_validation", y=y)
+        X, y = check_X_y(X, y)
+        if self.code_size <= 0:
+            raise ValueError("code_size should be greater than 0, got {0}"
+                             "".format(self.code_size))
 
+        _check_estimator(self.estimator)
         random_state = check_random_state(self.random_state)
         check_classification_targets(y)
 
         self.classes_ = np.unique(y)
         n_classes = self.classes_.shape[0]
-        if n_classes == 0:
-            raise ValueError(
-                "OutputCodeClassifier can not be fit when no class is present."
-            )
         code_size_ = int(n_classes * self.code_size)
 
         # FIXME: there are more elaborate methods than generating the codebook
         # randomly.
-        self.code_book_ = random_state.uniform(size=(n_classes, code_size_))
-        self.code_book_[self.code_book_ > 0.5] = 1.0
+        self.code_book_ = random_state.random_sample((n_classes, code_size_))
+        self.code_book_[self.code_book_ > 0.5] = 1
 
         if hasattr(self.estimator, "decision_function"):
-            self.code_book_[self.code_book_ != 1] = -1.0
+            self.code_book_[self.code_book_ != 1] = -1
         else:
-            self.code_book_[self.code_book_ != 1] = 0.0
+            self.code_book_[self.code_book_ != 1] = 0
 
-        classes_index = {c: i for i, c in enumerate(self.classes_)}
+        classes_index = dict((c, i) for i, c in enumerate(self.classes_))
 
-        Y = np.array(
-            [self.code_book_[classes_index[y[i]]] for i in range(_num_samples(y))],
-            dtype=int,
-        )
+        Y = np.array([self.code_book_[classes_index[y[i]]]
+                      for i in range(X.shape[0])], dtype=np.int)
 
         self.estimators_ = Parallel(n_jobs=self.n_jobs)(
-            delayed(_fit_binary)(self.estimator, X, Y[:, i]) for i in range(Y.shape[1])
-        )
-
-        if hasattr(self.estimators_[0], "n_features_in_"):
-            self.n_features_in_ = self.estimators_[0].n_features_in_
-        if hasattr(self.estimators_[0], "feature_names_in_"):
-            self.feature_names_in_ = self.estimators_[0].feature_names_in_
+            delayed(_fit_binary)(self.estimator, X, Y[:, i])
+            for i in range(Y.shape[1]))
 
         return self
 
@@ -1059,22 +759,16 @@ class OutputCodeClassifier(
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : (sparse) array-like, shape = [n_samples, n_features]
             Data.
 
         Returns
         -------
-        y : ndarray of shape (n_samples,)
+        y : numpy array of shape [n_samples]
             Predicted multi-class targets.
         """
-        check_is_fitted(self)
-        # ArgKmin only accepts C-contiguous array. The aggregated predictions need to be
-        # transposed. We therefore create a F-contiguous array to avoid a copy and have
-        # a C-contiguous array after the transpose operation.
-        Y = np.array(
-            [_predict_binary(e, X) for e in self.estimators_],
-            order="F",
-            dtype=np.float64,
-        ).T
-        pred = pairwise_distances_argmin(Y, self.code_book_, metric="euclidean")
+        check_is_fitted(self, 'estimators_')
+        X = check_array(X)
+        Y = np.array([_predict_binary(e, X) for e in self.estimators_]).T
+        pred = euclidean_distances(Y, self.code_book_).argmin(axis=1)
         return self.classes_[pred]

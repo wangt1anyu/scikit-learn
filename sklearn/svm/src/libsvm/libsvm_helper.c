@@ -1,13 +1,6 @@
 #include <stdlib.h>
 #include <numpy/arrayobject.h>
 #include "svm.h"
-#include "_svm_cython_blas_helpers.h"
-
-
-#ifndef MAX
-    #define MAX(x, y) (((x) > (y)) ? (x) : (y))
-#endif
-
 
 /*
  * Some helper methods for libsvm bindings.
@@ -135,9 +128,6 @@ struct svm_model *set_model(struct svm_parameter *param, int nr_class,
     if ((model->rho = malloc( m * sizeof(double))) == NULL)
         goto rho_error;
 
-    // This is only allocated in dynamic memory while training.
-    model->n_iter = NULL;
-
     model->nr_class = nr_class;
     model->param = *param;
     model->l = (int) support_dims[0];
@@ -229,15 +219,6 @@ npy_intp get_nr(struct svm_model *model)
 }
 
 /*
- * Get the number of iterations run in optimization
- */
-void copy_n_iter(char *data, struct svm_model *model)
-{
-    const int n_models = MAX(1, model->nr_class * (model->nr_class-1) / 2);
-    memcpy(data, model->n_iter, n_models * sizeof(int));
-}
-
-/*
  * Some helpers to convert from libsvm sparse data structures
  * model->sv_coef is a double **, whereas data is just a double *,
  * so we have to do some stupid copying.
@@ -312,7 +293,7 @@ void copy_probB(char *data, struct svm_model *model, npy_intp * dims)
  *  It will return -1 if we run out of memory.
  */
 int copy_predict(char *predict, struct svm_model *model, npy_intp *predict_dims,
-                 char *dec_values, BlasFunctions *blas_functions)
+                 char *dec_values)
 {
     double *t = (double *) dec_values;
     struct svm_node *predict_nodes;
@@ -323,7 +304,7 @@ int copy_predict(char *predict, struct svm_model *model, npy_intp *predict_dims,
     if (predict_nodes == NULL)
         return -1;
     for(i=0; i<predict_dims[0]; ++i) {
-        *t = svm_predict(model, &predict_nodes[i], blas_functions);
+        *t = svm_predict(model, &predict_nodes[i]);
         ++t;
     }
     free(predict_nodes);
@@ -331,7 +312,7 @@ int copy_predict(char *predict, struct svm_model *model, npy_intp *predict_dims,
 }
 
 int copy_predict_values(char *predict, struct svm_model *model,
-                        npy_intp *predict_dims, char *dec_values, int nr_class, BlasFunctions *blas_functions)
+                        npy_intp *predict_dims, char *dec_values, int nr_class)
 {
     npy_intp i;
     struct svm_node *predict_nodes;
@@ -340,8 +321,7 @@ int copy_predict_values(char *predict, struct svm_model *model,
         return -1;
     for(i=0; i<predict_dims[0]; ++i) {
         svm_predict_values(model, &predict_nodes[i],
-                                ((double *) dec_values) + i*nr_class,
-				blas_functions);
+                                ((double *) dec_values) + i*nr_class);
     }
 
     free(predict_nodes);
@@ -351,7 +331,7 @@ int copy_predict_values(char *predict, struct svm_model *model,
 
 
 int copy_predict_proba(char *predict, struct svm_model *model, npy_intp *predict_dims,
-                 char *dec_values, BlasFunctions *blas_functions)
+                 char *dec_values)
 {
     npy_intp i, n, m;
     struct svm_node *predict_nodes;
@@ -362,8 +342,7 @@ int copy_predict_proba(char *predict, struct svm_model *model, npy_intp *predict
         return -1;
     for(i=0; i<n; ++i) {
         svm_predict_probability(model, &predict_nodes[i],
-                                ((double *) dec_values) + i*m,
-				blas_functions);
+                                ((double *) dec_values) + i*m);
     }
     free(predict_nodes);
     return 0;
@@ -382,11 +361,9 @@ int free_model(struct svm_model *model)
     if (model == NULL) return -1;
     free(model->SV);
 
-    /* We don't free sv_ind and n_iter, since we did not create them in
+    /* We don't free sv_ind, since we did not create them in
        set_model */
-    /* free(model->sv_ind);
-     * free(model->n_iter);
-     */
+    /* free(model->sv_ind); */
     free(model->sv_coef);
     free(model->rho);
     free(model->label);

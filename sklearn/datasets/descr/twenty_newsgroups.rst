@@ -12,7 +12,7 @@ and after a specific date.
 This module contains two loaders. The first one,
 :func:`sklearn.datasets.fetch_20newsgroups`,
 returns a list of the raw texts that can be fed to text feature
-extractors such as :class:`~sklearn.feature_extraction.text.CountVectorizer`
+extractors such as :class:`sklearn.feature_extraction.text.CountVectorizer`
 with custom parameters so as to extract feature vectors.
 The second one, :func:`sklearn.datasets.fetch_20newsgroups_vectorized`,
 returns ready-to-use features, i.e., it is not necessary to use a feature
@@ -27,9 +27,8 @@ extractor.
     Features                  text
     =================   ==========
 
-|details-start|
-**Usage**
-|details-split|
+Usage
+~~~~~
 
 The :func:`sklearn.datasets.fetch_20newsgroups` function is a data
 fetching / caching functions that downloads the data archive from
@@ -90,11 +89,8 @@ list of the categories to load to the
   >>> newsgroups_train.target[:10]
   array([0, 1, 1, 1, 0, 1, 1, 0, 0, 0])
 
-|details-end|
-
-|details-start|
-**Converting text to vectors**
-|details-split|
+Converting text to vectors
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to feed predictive or clustering models with the text data,
 one first need to turn the text into vectors of numerical values suitable
@@ -117,20 +113,18 @@ The extracted TF-IDF vectors are very sparse, with an average of 159 non-zero
 components by sample in a more than 30000-dimensional space
 (less than .5% non-zero features)::
 
-  >>> vectors.nnz / float(vectors.shape[0])
+  >>> vectors.nnz / float(vectors.shape[0])       # doctest: +ELLIPSIS
   159.01327...
 
-:func:`sklearn.datasets.fetch_20newsgroups_vectorized` is a function which
+:func:`sklearn.datasets.fetch_20newsgroups_vectorized` is a function which 
 returns ready-to-use token counts features instead of file names.
 
 .. _`20 newsgroups website`: http://people.csail.mit.edu/jrennie/20Newsgroups/
 .. _`TF-IDF`: https://en.wikipedia.org/wiki/Tf-idf
 
-|details-end|
 
-|details-start|
-**Filtering text for more realistic training**
-|details-split|
+Filtering text for more realistic training
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 It is easy for a classifier to overfit on particular things that appear in the
 20 Newsgroups data, such as newsgroup headers. Many classifiers achieve very
@@ -150,7 +144,7 @@ which is fast to train and achieves a decent F-score::
   MultinomialNB(alpha=0.01, class_prior=None, fit_prior=True)
 
   >>> pred = clf.predict(vectors_test)
-  >>> metrics.f1_score(newsgroups_test.target, pred, average='macro')
+  >>> metrics.f1_score(newsgroups_test.target, pred, average='macro')  # doctest: +ELLIPSIS
   0.88213...
 
 (The example :ref:`sphx_glr_auto_examples_text_plot_document_classification_20newsgroups.py` shuffles
@@ -162,7 +156,7 @@ Let's take a look at what the most informative features are:
 
   >>> import numpy as np
   >>> def show_top10(classifier, vectorizer, categories):
-  ...     feature_names = vectorizer.get_feature_names_out()
+  ...     feature_names = np.asarray(vectorizer.get_feature_names())
   ...     for i, category in enumerate(categories):
   ...         top10 = np.argsort(classifier.coef_[i])[-10:]
   ...         print("%s: %s" % (category, " ".join(feature_names[top10])))
@@ -201,7 +195,7 @@ blocks, and quotation blocks respectively.
   ...                                      categories=categories)
   >>> vectors_test = vectorizer.transform(newsgroups_test.data)
   >>> pred = clf.predict(vectors_test)
-  >>> metrics.f1_score(pred, newsgroups_test.target, average='macro')
+  >>> metrics.f1_score(pred, newsgroups_test.target, average='macro')  # doctest: +ELLIPSIS
   0.77310...
 
 This classifier lost over a lot of its F-score, just because we removed
@@ -218,47 +212,22 @@ It loses even more if we also strip this metadata from the training data:
 
   >>> vectors_test = vectorizer.transform(newsgroups_test.data)
   >>> pred = clf.predict(vectors_test)
-  >>> metrics.f1_score(newsgroups_test.target, pred, average='macro')
+  >>> metrics.f1_score(newsgroups_test.target, pred, average='macro')  # doctest: +ELLIPSIS
   0.76995...
 
-Some other classifiers cope better with this harder version of the task. Try the
-:ref:`sphx_glr_auto_examples_model_selection_plot_grid_search_text_feature_extraction.py`
-example with and without the `remove` option to compare the results.
-|details-end|
-
-.. topic:: Data Considerations
-
-  The Cleveland Indians is a major league baseball team based in Cleveland,
-  Ohio, USA. In December 2020, it was reported that "After several months of
-  discussion sparked by the death of George Floyd and a national reckoning over
-  race and colonialism, the Cleveland Indians have decided to change their
-  name." Team owner Paul Dolan "did make it clear that the team will not make
-  its informal nickname -- the Tribe -- its new team name." "It's not going to
-  be a half-step away from the Indians," Dolan said."We will not have a Native
-  American-themed name."
-
-  https://www.mlb.com/news/cleveland-indians-team-name-change
+Some other classifiers cope better with this harder version of the task. Try
+running :ref:`sphx_glr_auto_examples_model_selection_grid_search_text_feature_extraction.py` with and without
+the ``--filter`` option to compare the results.
 
 .. topic:: Recommendation
 
-  - When evaluating text classifiers on the 20 Newsgroups data, you
-    should strip newsgroup-related metadata. In scikit-learn, you can do this
-    by setting ``remove=('headers', 'footers', 'quotes')``. The F-score will be
-    lower because it is more realistic.
-  - This text dataset contains data which may be inappropriate for certain NLP
-    applications. An example is listed in the "Data Considerations" section
-    above. The challenge with using current text datasets in NLP for tasks such
-    as sentence completion, clustering, and other applications is that text
-    that is culturally biased and inflammatory will propagate biases. This
-    should be taken into consideration when using the dataset, reviewing the
-    output, and the bias should be documented.
+  When evaluating text classifiers on the 20 Newsgroups data, you
+  should strip newsgroup-related metadata. In scikit-learn, you can do this by
+  setting ``remove=('headers', 'footers', 'quotes')``. The F-score will be
+  lower because it is more realistic.
 
 .. topic:: Examples
 
-   * :ref:`sphx_glr_auto_examples_model_selection_plot_grid_search_text_feature_extraction.py`
+   * :ref:`sphx_glr_auto_examples_model_selection_grid_search_text_feature_extraction.py`
 
    * :ref:`sphx_glr_auto_examples_text_plot_document_classification_20newsgroups.py`
-
-   * :ref:`sphx_glr_auto_examples_text_plot_hashing_vs_dict_vectorizer.py`
-
-   * :ref:`sphx_glr_auto_examples_text_plot_document_clustering.py`

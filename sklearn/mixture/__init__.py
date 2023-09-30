@@ -2,7 +2,9 @@
 The :mod:`sklearn.mixture` module implements mixture modeling algorithms.
 """
 
-from ._bayesian_mixture import BayesianGaussianMixture
-from ._gaussian_mixture import GaussianMixture
+from .gaussian_mixture import GaussianMixture
+from .bayesian_mixture import BayesianGaussianMixture
 
-__all__ = ["GaussianMixture", "BayesianGaussianMixture"]
+
+__all__ = ['GaussianMixture',
+           'BayesianGaussianMixture']

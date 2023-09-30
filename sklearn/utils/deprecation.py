@@ -1,10 +1,11 @@
-import functools
+import sys
 import warnings
+import functools
 
-__all__ = ["deprecated"]
+__all__ = ["deprecated", "DeprecationDict"]
 
 
-class deprecated:
+class deprecated(object):
     """Decorator to mark a function or class as deprecated.
 
     Issue a warning when the function is called/the class is instantiated and
@@ -15,7 +16,7 @@ class deprecated:
     in an empty of parentheses:
 
     >>> from sklearn.utils import deprecated
-    >>> deprecated()
+    >>> deprecated() # doctest: +ELLIPSIS
     <sklearn.utils.deprecation.deprecated object at ...>
 
     >>> @deprecated()
@@ -23,14 +24,14 @@ class deprecated:
 
     Parameters
     ----------
-    extra : str, default=''
-          To be added to the deprecation messages.
+    extra : string
+          to be added to the deprecation messages
     """
 
-    # Adapted from https://wiki.python.org/moin/PythonDecoratorLibrary,
+    # Adapted from http://wiki.python.org/moin/PythonDecoratorLibrary,
     # but with many changes.
 
-    def __init__(self, extra=""):
+    def __init__(self, extra=''):
         self.extra = extra
 
     def __call__(self, obj):
@@ -42,15 +43,6 @@ class deprecated:
         """
         if isinstance(obj, type):
             return self._decorate_class(obj)
-        elif isinstance(obj, property):
-            # Note that this is only triggered properly if the `property`
-            # decorator comes before the `deprecated` decorator, like so:
-            #
-            # @deprecated(msg)
-            # @property
-            # def deprecated_attribute_(self):
-            #     ...
-            return self._decorate_property(obj)
         else:
             return self._decorate_fun(obj)
 
@@ -59,18 +51,17 @@ class deprecated:
         if self.extra:
             msg += "; %s" % self.extra
 
-        new = cls.__new__
+        # FIXME: we should probably reset __new__ for full generality
+        init = cls.__init__
 
-        def wrapped(cls, *args, **kwargs):
-            warnings.warn(msg, category=FutureWarning)
-            if new is object.__new__:
-                return object.__new__(cls)
-            return new(cls, *args, **kwargs)
+        def wrapped(*args, **kwargs):
+            warnings.warn(msg, category=DeprecationWarning)
+            return init(*args, **kwargs)
+        cls.__init__ = wrapped
 
-        cls.__new__ = wrapped
-
-        wrapped.__name__ = "__new__"
-        wrapped.deprecated_original = new
+        wrapped.__name__ = '__init__'
+        wrapped.__doc__ = self._update_doc(init.__doc__)
+        wrapped.deprecated_original = init
 
         return cls
 
@@ -83,33 +74,79 @@ class deprecated:
 
         @functools.wraps(fun)
         def wrapped(*args, **kwargs):
-            warnings.warn(msg, category=FutureWarning)
+            warnings.warn(msg, category=DeprecationWarning)
             return fun(*args, **kwargs)
 
+        wrapped.__doc__ = self._update_doc(wrapped.__doc__)
         # Add a reference to the wrapped function so that we can introspect
         # on function arguments in Python 2 (already works in Python 3)
         wrapped.__wrapped__ = fun
 
         return wrapped
 
-    def _decorate_property(self, prop):
-        msg = self.extra
-
-        @property
-        @functools.wraps(prop)
-        def wrapped(*args, **kwargs):
-            warnings.warn(msg, category=FutureWarning)
-            return prop.fget(*args, **kwargs)
-
-        return wrapped
+    def _update_doc(self, olddoc):
+        newdoc = "DEPRECATED"
+        if self.extra:
+            newdoc = "%s: %s" % (newdoc, self.extra)
+        if olddoc:
+            newdoc = "%s\n\n%s" % (newdoc, olddoc)
+        return newdoc
 
 
 def _is_deprecated(func):
-    """Helper to check if func is wrapped by our deprecated decorator"""
-    closures = getattr(func, "__closure__", [])
+    """Helper to check if func is wraped by our deprecated decorator"""
+    if sys.version_info < (3, 5):
+        raise NotImplementedError("This is only available for python3.5 "
+                                  "or above")
+    closures = getattr(func, '__closure__', [])
     if closures is None:
         closures = []
-    is_deprecated = "deprecated" in "".join(
-        [c.cell_contents for c in closures if isinstance(c.cell_contents, str)]
-    )
+    is_deprecated = ('deprecated' in ''.join([c.cell_contents
+                                              for c in closures
+                     if isinstance(c.cell_contents, str)]))
     return is_deprecated
+
+
+class DeprecationDict(dict):
+    """A dict which raises a warning when some keys are looked up
+
+    Note, this does not raise a warning for __contains__ and iteration.
+
+    It also will raise a warning even after the key has been manually set by
+    the user.
+    """
+    def __init__(self, *args, **kwargs):
+        self._deprecations = {}
+        super(DeprecationDict, self).__init__(*args, **kwargs)
+
+    def __getitem__(self, key):
+        if key in self._deprecations:
+            warn_args, warn_kwargs = self._deprecations[key]
+            warnings.warn(*warn_args, **warn_kwargs)
+        return super(DeprecationDict, self).__getitem__(key)
+
+    def get(self, key, default=None):
+        """Return the value corresponding to key, else default.
+
+        Parameters
+        ----------
+        key : any hashable object
+            The key
+        default : object, optional
+            The default returned when key is not in dict
+        """
+        # dict does not implement it like this, hence it needs to be overridden
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def add_warning(self, key, *args, **kwargs):
+        """Add a warning to be triggered when the specified key is read
+
+        Parameters
+        ----------
+        key : any hashable object
+            The key
+        """
+        self._deprecations[key] = (args, kwargs)
